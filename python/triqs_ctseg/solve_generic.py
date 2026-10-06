@@ -36,6 +36,44 @@ def _canonicalize_h_loc0(h_loc0, gf_struct):
     return op_from_block_matrix(bl, gf_struct), bl
 
 
+def _check_meshes(Delta_iw, D0_iw):
+    """Check that D0_iw lives on the same kind of mesh as Delta_iw.
+
+    For a MeshDLRImFreq input, D0_iw must be on a bosonic DLR mesh with the same
+    beta, w_max and eps; for a MeshImFreq input, on a bosonic MeshImFreq with the
+    same beta. 
+    
+    Warn if a DLR input mesh is not symmetrized, since post-processed outputs are 
+    sampled onto symmetrized DLR meshes.
+    """
+    mesh = Delta_iw.mesh
+    is_dlr = isinstance(mesh, MeshDLRImFreq)
+    if is_dlr and not mesh.symmetrize:
+        mpi.report("WARNING: Delta_iw.mesh was built with symmetrize=False. Post-processed outputs are "
+                   "sampled onto symmetrized DLR meshes, so their nodes differ from the input mesh.")
+    if D0_iw is None:
+        return
+
+    for name1, name2 in D0_iw.indices:
+        mesh_b = D0_iw[name1, name2].mesh
+        where = f"D0_iw[{name1!r}, {name2!r}].mesh"
+        if type(mesh_b) is not type(mesh):
+            raise ValueError(f"{where} is a {type(mesh_b).__name__}, but Delta_iw.mesh is a "
+                             f"{type(mesh).__name__}. D0_iw must live on the same kind of mesh as Delta_iw.")
+        if 'Boson' not in str(mesh_b.statistic):
+            raise ValueError(f"{where} must be bosonic.")
+        if mesh_b.beta != mesh.beta:
+            raise ValueError(f"{where} has beta = {mesh_b.beta}, but Delta_iw.mesh has beta = {mesh.beta}.")
+        if is_dlr:
+            if not (mesh_b.w_max == mesh.w_max and mesh_b.eps == mesh.eps):
+                raise ValueError(f"{where} has (w_max, eps) = ({mesh_b.w_max}, {mesh_b.eps}), but Delta_iw.mesh "
+                                 f"has ({mesh.w_max}, {mesh.eps}). D0_iw must use the DLR parameters of Delta_iw.")
+
+    if is_dlr and not all(D0_iw[n1, n2].mesh.symmetrize for n1, n2 in D0_iw.indices):
+        mpi.report("WARNING: D0_iw was built on a DLR mesh with symmetrize=False. Post-processed outputs are "
+                   "sampled onto symmetrized DLR meshes, so their nodes differ from the input mesh.")
+
+
 _POST_PROC_DEFAULTS = {
     'perform_tail_fit': False,
     'fit_max_moment': 3,
@@ -70,16 +108,37 @@ def _prepare_solver(
     solver_params['measure_densities'] = True
     solver_params['measure_G_tau'] = not solve_density_only
     solver_params['measure_F_tau'] = not solve_density_only
-    solver_params['measure_nn_tau'] = not solve_density_only
+
+    post_proc_params = {k: solver_params.pop(k, default) for k, default in _POST_PROC_DEFAULTS.items()}
+    post_proc_params['dlr_omega_max'] = None
+    post_proc_params['dlr_epsilon'] = None
 
     if isinstance(mesh, MeshDLRImFreq):
+        # DLR parameters for the nn_nu_dlr measurement.
+        # They in principle can be different from the DLR parameters of the input mesh. 
         solver_params.setdefault('dlr_omega_max', mesh.w_max)
-        solver_params.setdefault('dlr_eps', mesh.eps)
-        max_dlr_idx = max(abs(iw.index) for iw in mesh)
+        solver_params.setdefault('dlr_epsilon', mesh.eps)
+
+        # Post-processed outputs are sampled back onto the input DLR mesh, independent of
+        # any dlr_omega_max/dlr_epsilon the user passed for the nn_nu_dlr measurement
+        post_proc_params['dlr_omega_max'] = mesh.w_max
+        post_proc_params['dlr_epsilon'] = mesh.eps
+        
+        # n_iw must cover both the fermionic and the bosonic DLR output meshes.
+        mesh_b = MeshDLRImFreq(beta=beta, statistic='Boson', w_max=mesh.w_max, eps=mesh.eps, symmetrize=True)
+        max_dlr_idx = max(abs(iw.index) for m in (mesh, mesh_b) for iw in m)
         if max_dlr_idx > n_iw:
-            mpi.report(f"WARNING: n_iw = {n_iw} is smaller than the maximum DLR frequency index"
-                       f" ({max_dlr_idx}). Setting n_iw to {max_dlr_idx+1}.")
+            mpi.report(f"WARNING: n_iw = {n_iw} is smaller than the maximum fermionic/bosonic DLR frequency"
+                       f" index ({max_dlr_idx}). Setting n_iw to {max_dlr_idx+1}.")
             n_iw = max_dlr_idx + 1
+
+    # postprocess_pi Fourier transforms D0(tau) onto n_iw bosonic frequencies, which TRIQS only
+    # allows for n_tau_bosonic >= 2*n_iw + 1 (and is accurate up to the last frequencies for >= 6*n_iw + 1)
+    if solver_params.get('measure_nn_nu_dlr', False) and not solve_density_only and n_tau_bosonic < 2 * n_iw + 1:
+        mpi.report(f"WARNING: n_tau_bosonic = {n_tau_bosonic} is too small to Fourier transform D0(tau) onto"
+                   f" n_iw = {n_iw} bosonic frequencies in the post-processing. Setting n_tau_bosonic to"
+                   f" {2*n_iw + 1}; n_tau_bosonic >= 6*n_iw + 1 = {6*n_iw + 1} is recommended.")
+        n_tau_bosonic = 2 * n_iw + 1
 
     S = Solver(gf_struct=gf_struct, beta=beta, n_tau=n_tau, n_tau_bosonic=n_tau_bosonic)
     # Solver does not expose these as attributes; postprocess_sigma relies on them
@@ -88,10 +147,6 @@ def _prepare_solver(
     S.gf_struct = gf_struct
     S.h_int = h_int
     S.h_loc0_mat = h_loc0_bl
-
-    post_proc_params = {k: solver_params.pop(k, default) for k, default in _POST_PROC_DEFAULTS.items()}
-    post_proc_params['dlr_w_max'] = solver_params.pop('dlr_omega_max', None)
-    post_proc_params['dlr_eps'] = solver_params.pop('dlr_eps', None)
 
     return S, n_tau, solver_params, post_proc_params
 
@@ -132,6 +187,7 @@ def _run_solver(Delta_iw, h_loc0, h_int, D0_iw, solve_density_only, **params):
     """Set up the solver, run MC, and return (S, post_proc_params)."""
     gf_struct = [(bl, gf.target_shape[0]) for (bl, gf) in Delta_iw]
     h_loc0_op, h_loc0_bl = _canonicalize_h_loc0(h_loc0, gf_struct)
+    _check_meshes(Delta_iw, D0_iw)
 
     S, n_tau, solver_params, post_proc_params = _prepare_solver(
         Delta_iw, h_loc0_bl, h_int,
@@ -165,7 +221,9 @@ def solve_generic(
     h_int : Operator
         Interaction Hamiltonian.
     D0_iw : Block2Gf, optional
-        Bosonic Weiss field for dynamic interactions.
+        Bosonic Weiss field for dynamic interactions. Must live on the same kind of
+        mesh as Delta_iw: a bosonic MeshDLRImFreq with the same w_max and eps, or a
+        bosonic MeshImFreq.
     symmetrize_func : callable, optional
         Symmetrization function for post-processing.
     **solver_interface_params
@@ -180,6 +238,7 @@ def solve_generic(
         solve_density_only=False, **solver_interface_params,
     )
 
+    # FIXME Add Pi_iw, W_iw, and Chi_iw to SolverResults
     pp_results = postprocess(S, symmetrize_func=symmetrize_func, **post_proc_params)
     result_kwargs = {k: v for k, v in pp_results.items() if v is not None}
     result_kwargs['Solver'] = S

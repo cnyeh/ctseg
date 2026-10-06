@@ -279,7 +279,7 @@ def postprocess_sigma(
             fit_min_w=post_proc_params['fit_min_w'],
             fit_max_w=post_proc_params['fit_max_w'],
             fit_max_moment=post_proc_params['fit_max_moment'],
-            fit_known_moments=None,
+            fit_known_moments=solver.Sigma_moments,
         )
 
     Sigma_iw << make_hermitian(Sigma_iw)
@@ -320,7 +320,17 @@ def postprocess_pi(
     output_in_4idx=False,
     truncate_uchi=False,
 ):
-    """Post-process the charge susceptibility to obtain the impurity polarizability and screened interaction."""
+    """
+    Post-process the polarization and screened interaction from the CT-SEG solver.
+
+    Steps:
+    1. Subtract the constant part of the charge susceptibility on nn_dlr(iw)
+    2. Convert to uniform Matsubara frequency mesh
+    3. Convert nn(iw), D0(iw) from color basis to orbital-product basis
+    4. Convert h_int to orbital-product basis
+    5. Compute Pi(iw) and W(iw) via Dyson equation
+    6. Return Pi(iw), W(iw), and Chi(iw) (i.e. nn(iw))
+    """
     mpi.report("Charge susceptibility is measured for a impurity with dynamic interactions")
     mpi.report('--> Post-processing the density-density susceptibility to obtain the impurity polarizability.\n')
 
@@ -417,7 +427,7 @@ def postprocess_pi(
         UX = check_spectrum(UX, truncation=truncate_uchi)
         denom = UX - ones
         cond = np.linalg.cond(denom)
-        if cond > 20:
+        if cond > 100:
             mpi.report(f"WARNING: Large condition number for [U(w) * Chi(w) - I] = {cond} at n = {iwn.index}.")
         Pi_iw_pb[iwn] = nn_iw_pb[iwn] @ np.linalg.pinv(denom)
         Pi_iw_pb[iwn].imag = 0.0
@@ -492,11 +502,12 @@ def postprocess(
             )
         )
 
-    wmax = post_proc_params.get('dlr_w_max')
-    eps = post_proc_params.get('dlr_eps')
+    wmax = post_proc_params.get('dlr_omega_max')
+    eps = post_proc_params.get('dlr_epsilon')
     if wmax is not None and eps is not None:
         from triqs.solver_utils import make_gf_dlr_imfreq
-        keys = ['Sigma_iw', 'G_iw'] + (['Pi_iw', 'W_iw', 'Chi_iw'] if has_chi else [])
+        # FIXME What should we we do with `Sigma_iw` then? Keep it on the uniform mesh? 
+        keys = ['Sigma_dynamic', 'G_iw'] + (['Pi_iw', 'W_iw', 'Chi_iw'] if has_chi else [])
         for k in keys:
             pp_results[k] = make_gf_dlr_imfreq(pp_results[k], w_max=wmax, eps=eps)
 

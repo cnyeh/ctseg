@@ -9,7 +9,9 @@ This combination is the only code path in solve_generic that is not
 already covered by solve_generic_dlr.py or solve_generic_dynamical_U.py:
 the `if D0_iw is not None:` branch inside the MeshDLRImFreq block of
 _prepare_delta_tau, which funnels the bosonic Weiss field through
-make_gf_imtime instead of Fourier + tail fit.
+make_gf_imtime instead of Fourier + tail fit.  It also runs postprocess_pi
+with nn_nu_dlr measured on the DLR parameters of the input mesh, and the DLR
+output conversion of Pi/W/Chi.
 """
 
 from triqs.gfs import (
@@ -64,12 +66,22 @@ results = solve_generic(
     n_warmup_cycles=1000,
     n_cycles=10000,
     analytic_hf=True,
+    measure_nn_nu_dlr=True
 )
 
 if mpi.is_master_node():
     # DLR output conversion should have been applied
-    sigma_mesh_type = type(results.Sigma_iw.mesh).__name__
+    sigma_mesh_type = type(results.Sigma_dynamic.mesh).__name__
     assert 'DLR' in sigma_mesh_type, f"expected DLR mesh, got {sigma_mesh_type}"
+
+    # nn_nu_dlr is measured on the input mesh's DLR parameters
+    nn_mesh = results.Solver.results.nn_nu_dlr['up', 'up'].mesh
+    assert (nn_mesh.w_max, nn_mesh.eps) == (w_max, dlr_eps), (nn_mesh.w_max, nn_mesh.eps)
+
+    # postprocess_pi fired, and its outputs were converted to DLR meshes
+    for key in ('Pi_iw', 'W_iw', 'Chi_iw'):
+        assert key in results.keys(), f"{key} missing"
+        assert 'DLR' in type(results[key].mesh).__name__, key
 
     # Analytic HF + dynamic D0 exercises extract_screen_matrix_from_D0_tau
     assert results.Sigma_HartreeFock is not None

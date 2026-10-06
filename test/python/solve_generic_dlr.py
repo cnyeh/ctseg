@@ -9,7 +9,7 @@ Exercises:
   - _prepare_delta_tau MeshDLRImFreq branch (make_gf_imtime, no tail fit)
   - compute_sigma_hartreefock via analytic_hf=True (uses
     extract_u_tensor_from_h_int + densities)
-  - DLR output conversion in postprocess (dlr_w_max + dlr_eps pulled
+  - DLR output conversion in postprocess (dlr_omega_max + dlr_epsilon taken
     from the Delta_iw mesh -> make_gf_dlr_imfreq applied to
     Sigma_iw / G_iw)
 """
@@ -54,9 +54,9 @@ results = solve_generic(
 )
 
 if mpi.is_master_node():
-    # DLR conversion should have been applied: Sigma_iw / G_iw now live on
+    # DLR conversion should have been applied: Sigma_dynamic / G_iw now live on
     # a DLR-imfreq mesh
-    sigma_mesh_type = type(results.Sigma_iw.mesh).__name__
+    sigma_mesh_type = type(results.Sigma_dynamic.mesh).__name__
     g_mesh_type = type(results.G_iw.mesh).__name__
     assert 'DLR' in sigma_mesh_type, f"expected DLR mesh, got {sigma_mesh_type}"
     assert 'DLR' in g_mesh_type, f"expected DLR mesh, got {g_mesh_type}"
